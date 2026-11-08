@@ -172,5 +172,5 @@
     return { files: downloaded, missing };
   }
 
-  window.CharExport = { exportCharacters, buildJson, buildCsv, collectImageFiles, countImages };
+  window.CharExport = { exportCharacters, buildJson, buildCsv, collectImageFiles, countImages, download };
 })();

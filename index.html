@@ -27,6 +27,20 @@
 
       <ul id="folder-list" class="folder-list" aria-label="角色資料夾"></ul>
       <p id="folder-count" class="folder-count"></p>
+
+      <div class="backup-box">
+        <div class="backup-actions">
+          <button id="btn-backup" class="btn btn-ghost" type="button" title="把所有角色與圖片打包成一個備份檔">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7m16 0-2-3H6L4 7m16 0H4m8 4v6m0 0-3-3m3 3 3-3"/></svg>
+            完整備份
+          </button>
+          <button id="btn-restore" class="btn btn-ghost" type="button" title="從備份檔還原">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7m16 0-2-3H6L4 7m16 0H4m8 10v-6m0 0-3 3m3-3 3 3"/></svg>
+            匯入還原
+          </button>
+        </div>
+        <p id="backup-status" class="backup-status"></p>
+      </div>
     </aside>
 
     <!-- 右側：角色內容 -->
@@ -173,6 +187,45 @@
     </form>
   </dialog>
 
+  <!-- 匯入還原視窗 -->
+  <dialog id="restore-dialog" class="dialog">
+    <form method="dialog" class="dialog-body">
+      <h2>匯入還原</h2>
+
+      <dl class="summary">
+        <div><dt>備份檔</dt><dd data-bind="fileName"></dd></div>
+        <div><dt>備份時間</dt><dd data-bind="createdAt"></dd></div>
+        <div><dt>內容</dt><dd data-bind="contents"></dd></div>
+      </dl>
+
+      <fieldset class="choice-group" data-bind="modes">
+        <legend>還原方式</legend>
+        <label class="choice">
+          <input type="radio" name="mode" value="merge" checked>
+          <span>
+            <strong>合併（建議）</strong>
+            <small>保留目前的角色；備份裡相同的角色會換成備份的版本，其餘新增進來。</small>
+          </span>
+        </label>
+        <label class="choice">
+          <input type="radio" name="mode" value="replace">
+          <span>
+            <strong>全部取代</strong>
+            <small>還原後資料會和備份完全一樣，<b>備份裡沒有的角色會被刪除</b>（目前 <span data-bind="currentCount"></span> 個角色）。</small>
+          </span>
+        </label>
+      </fieldset>
+
+      <p class="dialog-progress" data-bind="progress" hidden></p>
+      <p class="dialog-error" data-bind="error" hidden></p>
+
+      <menu class="dialog-actions">
+        <button class="btn btn-ghost" value="cancel" type="submit" data-action="cancel">取消</button>
+        <button class="btn btn-primary" type="button" data-action="confirm-restore">開始還原</button>
+      </menu>
+    </form>
+  </dialog>
+
   <!-- 圖片檢視 -->
   <dialog id="viewer" class="viewer" aria-label="圖片檢視">
     <div class="viewer-bar">
@@ -185,11 +238,13 @@
   </dialog>
 
   <input id="file-input" type="file" accept="image/*" multiple hidden>
+  <input id="backup-input" type="file" accept=".zip,application/zip,application/x-zip-compressed" hidden>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
   <script src="js/db.js"></script>
   <script src="js/zip.js"></script>
   <script src="js/export.js"></script>
+  <script src="js/backup.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>

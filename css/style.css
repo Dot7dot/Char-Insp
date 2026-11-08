@@ -290,7 +290,7 @@ small { color: var(--text-muted); font-weight: 400; }
 .choice:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
 .choice:has(input:disabled) { opacity: .5; cursor: not-allowed; }
 .choice input, .check input { margin-top: 3px; accent-color: var(--accent); }
-.choice span, .check span { display: flex; flex-direction: column; }
+.choice > span, .check > span { display: flex; flex-direction: column; }
 .choice small, .check small { font-size: 12.5px; }
 
 .choice-group legend small { font-weight: 400; }
@@ -344,3 +344,19 @@ small { color: var(--text-muted); font-weight: 400; }
   .gallery-picture { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
   .dialogue-add { flex-direction: column; align-items: stretch; }
 }
+
+/* ---------- Backup ---------- */
+.backup-box { display: flex; flex-direction: column; gap: 8px; padding-top: 12px; border-top: 1px solid var(--border); }
+.backup-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.backup-actions .btn { padding: 8px 10px; }
+.btn:disabled { opacity: .55; cursor: progress; }
+.backup-status { margin: 0; font-size: 12px; color: var(--text-muted); text-align: center; }
+.backup-status.is-warn { color: var(--danger); }
+
+.summary { margin: 0; display: grid; gap: 6px; padding: 12px; border-radius: 10px; background: var(--surface-2); font-size: 13.5px; }
+.summary div { display: grid; grid-template-columns: 72px 1fr; gap: 8px; }
+.summary dt { color: var(--text-muted); }
+.summary dd { margin: 0; word-break: break-all; }
+.dialog-progress { margin: 0; padding: 8px 12px; border-radius: 8px; background: var(--accent-soft); color: var(--accent); font-size: 13.5px; }
+.dialog-progress[hidden] { display: none; }
+.choice small b { color: var(--danger); font-weight: 600; }
