@@ -87,9 +87,11 @@
    *   <角色資料夾>/icon/01_原檔名.png
    *   <角色資料夾>/head/01_原檔名.png
    *   <角色資料夾>/picture/01_原檔名.png
+   * 圖片從 IndexedDB 讀出；讀不到的圖片會略過並計入 missing。
    */
-  function collectImageFiles(characters) {
+  async function collectImageFiles(characters) {
     const files = [];
+    let missing = 0;
     const usedFolders = new Set();
     for (const c of characters) {
       const base = folderNameFor(c);
@@ -98,17 +100,27 @@
       usedFolders.add(folder.toLowerCase());
 
       for (const field of IMAGE_FIELDS) {
-        (c[field] || []).forEach((img, i) => {
+        const list = c[field] || [];
+        for (let i = 0; i < list.length; i++) {
+          const img = list[i];
+          const rec = img.broken ? null : await CharDB.getImage(img.id).catch(() => null);
+          if (!rec || !rec.data) {
+            missing++;
+            continue;
+          }
           const num = String(i + 1).padStart(2, '0');
-          files.push({ path: `${folder}/${field}/${num}_${imageFileName(img)}`, data: img.blob });
-        });
+          files.push({ path: `${folder}/${field}/${num}_${imageFileName(img)}`, data: new Uint8Array(rec.data) });
+        }
       }
     }
-    return files;
+    return { files, missing };
   }
 
   function countImages(characters) {
-    return characters.reduce((n, c) => n + IMAGE_FIELDS.reduce((m, f) => m + (c[f] || []).length, 0), 0);
+    return characters.reduce(
+      (n, c) => n + IMAGE_FIELDS.reduce((m, f) => m + (c[f] || []).filter((i) => !i.broken).length, 0),
+      0
+    );
   }
 
   function timestamp() {
@@ -132,11 +144,12 @@
   /**
    * @param {Array} characters
    * @param {{text: 'json'|'csv'|null, images: boolean, baseName?: string}} options
-   * @returns {Promise<string[]>} 已下載的檔名
+   * @returns {Promise<{files: string[], missing: number}>} 已下載的檔名、無法讀取而略過的圖片數
    */
   async function exportCharacters(characters, options) {
     const base = options.baseName || `characters_${timestamp()}`;
     const downloaded = [];
+    let missing = 0;
 
     if (options.text === 'csv') {
       download(buildCsv(characters), `${base}.csv`, 'text/csv;charset=utf-8');
@@ -147,14 +160,16 @@
     }
 
     if (options.images) {
-      const files = collectImageFiles(characters);
+      const collected = await collectImageFiles(characters);
+      const files = collected.files;
+      missing = collected.missing;
       if (files.length) {
         const zip = await MiniZip.createZip(files);
         download(zip, `${base}_images.zip`);
         downloaded.push(`${base}_images.zip`);
       }
     }
-    return downloaded;
+    return { files: downloaded, missing };
   }
 
   window.CharExport = { exportCharacters, buildJson, buildCsv, collectImageFiles, countImages };

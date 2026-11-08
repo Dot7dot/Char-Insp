@@ -1,29 +1,28 @@
 /**
  * 角色資料儲存（IndexedDB）
  *
- * 使用 IndexedDB 而不是 localStorage，因為圖片可能很大，
- * localStorage 只有約 5MB 而且只能存字串。
+ * 兩個 object store：
+ *   characters：角色文字資料 + 圖片清單（只有中繼資料，不含圖片本體）
+ *     {
+ *       id, name, englishName, description,
+ *       icon / head / picture: [{ id, fileName, mimeType, size }],
+ *       dialogues: [{ id, text }],
+ *       createdAt, updatedAt
+ *     }
+ *   images：圖片本體 { id, data: ArrayBuffer, mimeType }
  *
- * 每個角色（= 一個資料夾）的資料結構：
- * {
- *   id: string,
- *   name: string,
- *   englishName: string,
- *   description: string,
- *   icon:    { blob: Blob, fileName: string, mimeType: string } | null,
- *   picture: { blob: Blob, fileName: string, mimeType: string } | null,
- *   head:    { blob: Blob, fileName: string, mimeType: string } | null,
- *   dialogues: [{ id: string, text: string }],
- *   createdAt: number,
- *   updatedAt: number
- * }
+ * 為什麼圖片要存 ArrayBuffer、而且跟角色分開存：
+ *  - iPhone Safari 從相簿 / 相機選的檔案只是「暫存檔」，下一次選檔時舊的暫存檔會被刪除。
+ *    如果只存 File / Blob 的參照，之後就讀不到了。所以上傳當下就把位元組完整讀出來存成 ArrayBuffer。
+ *  - 改文字時只會寫入 characters，不會每次都重寫所有圖片。
  */
 (function () {
   'use strict';
 
   const DB_NAME = 'char-insp';
-  const DB_VERSION = 1;
-  const STORE = 'characters';
+  const DB_VERSION = 2;
+  const CHARS = 'characters';
+  const IMAGES = 'images';
 
   let dbPromise = null;
 
@@ -37,39 +36,75 @@
       const req = indexedDB.open(DB_NAME, DB_VERSION);
       req.onupgradeneeded = () => {
         const db = req.result;
-        if (!db.objectStoreNames.contains(STORE)) {
-          const store = db.createObjectStore(STORE, { keyPath: 'id' });
-          store.createIndex('createdAt', 'createdAt');
+        if (!db.objectStoreNames.contains(CHARS)) {
+          db.createObjectStore(CHARS, { keyPath: 'id' }).createIndex('createdAt', 'createdAt');
+        }
+        if (!db.objectStoreNames.contains(IMAGES)) {
+          db.createObjectStore(IMAGES, { keyPath: 'id' });
         }
       };
-      req.onsuccess = () => resolve(req.result);
+      req.onsuccess = () => {
+        const db = req.result;
+        // 其他分頁升級資料庫時，關閉這個連線，避免卡住
+        db.onversionchange = () => db.close();
+        resolve(db);
+      };
       req.onerror = () => reject(req.error);
+      req.onblocked = () => reject(new Error('資料庫正在其他分頁使用中，請關閉其他「角色靈感庫」分頁後重新整理'));
     });
     return dbPromise;
   }
 
-  /** 執行一個 request，等整個 transaction 完成（確實寫入）後才回傳結果 */
-  async function run(mode, makeRequest) {
+  /** 在一個 transaction 中執行；等 transaction 完成（確實寫入）才 resolve */
+  async function run(stores, mode, fn) {
     const db = await open();
     return new Promise((resolve, reject) => {
-      const t = db.transaction(STORE, mode);
-      const req = makeRequest(t.objectStore(STORE));
-      t.oncomplete = () => resolve(req.result);
-      t.onerror = () => reject(t.error || req.error);
+      const t = db.transaction(stores, mode);
+      let result;
+      try {
+        result = fn(t);
+      } catch (err) {
+        try { t.abort(); } catch (_) { /* ignore */ }
+        reject(err);
+        return;
+      }
+      t.oncomplete = () => resolve(result && 'result' in result ? result.result : result);
+      t.onerror = () => reject(t.error);
       t.onabort = () => reject(t.error || new Error('Transaction aborted'));
     });
   }
 
   const CharDB = {
     async getAll() {
-      const items = await run('readonly', (store) => store.getAll());
+      const items = await run([CHARS], 'readonly', (t) => t.objectStore(CHARS).getAll());
       return (items || []).sort((a, b) => a.createdAt - b.createdAt);
     },
-    put(character) {
-      return run('readwrite', (store) => store.put(character));
+
+    /**
+     * 儲存角色；可同時新增 / 刪除圖片（同一個 transaction，要嘛全部成功、要嘛全部失敗）
+     * @param {object} character
+     * @param {{addImages?: Array<{id, data: ArrayBuffer, mimeType}>, deleteImageIds?: string[]}} [ops]
+     */
+    put(character, ops = {}) {
+      return run([CHARS, IMAGES], 'readwrite', (t) => {
+        const images = t.objectStore(IMAGES);
+        (ops.addImages || []).forEach((img) => images.put(img));
+        (ops.deleteImageIds || []).forEach((id) => images.delete(id));
+        t.objectStore(CHARS).put(character);
+      });
     },
-    remove(id) {
-      return run('readwrite', (store) => store.delete(id));
+
+    /** 刪除角色與它所有的圖片 */
+    remove(id, imageIds = []) {
+      return run([CHARS, IMAGES], 'readwrite', (t) => {
+        imageIds.forEach((imgId) => t.objectStore(IMAGES).delete(imgId));
+        t.objectStore(CHARS).delete(id);
+      });
+    },
+
+    /** @returns {Promise<{id, data: ArrayBuffer, mimeType}|undefined>} */
+    getImage(id) {
+      return run([IMAGES], 'readonly', (t) => t.objectStore(IMAGES).get(id));
     },
   };
 

@@ -97,7 +97,7 @@
           </div>
           <div class="gallery-grid gallery-picture" data-bind="grid"></div>
         </div>
-        <p class="hint">每一類都可以上傳多張。點「＋」或把圖片拖曳進來（可一次選多張）；點縮圖可開啟原圖。支援 PNG / JPG / GIF / WebP / SVG。</p>
+        <p class="hint">每一類都可以上傳多張。點「＋」或把圖片拖曳進來（可一次選多張）；點縮圖可放大檢視。支援 PNG / JPG / GIF / WebP / SVG。</p>
       </section>
 
       <section class="card">
@@ -171,6 +171,17 @@
         <button class="btn btn-primary" type="button" data-action="confirm-export">匯出</button>
       </menu>
     </form>
+  </dialog>
+
+  <!-- 圖片檢視 -->
+  <dialog id="viewer" class="viewer" aria-label="圖片檢視">
+    <div class="viewer-bar">
+      <span class="viewer-name" data-bind="name"></span>
+      <button class="viewer-close" type="button" data-action="close" aria-label="關閉">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
+      </button>
+    </div>
+    <img data-bind="img" alt="">
   </dialog>
 
   <input id="file-input" type="file" accept="image/*" multiple hidden>

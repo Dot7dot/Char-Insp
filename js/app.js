@@ -14,25 +14,6 @@
     query: '',
   };
 
-  // Blob → object URL 快取，避免重複產生
-  const urlCache = new WeakMap();
-  function blobUrl(blob) {
-    if (!blob) return '';
-    let url = urlCache.get(blob);
-    if (!url) {
-      url = URL.createObjectURL(blob);
-      urlCache.set(blob, url);
-    }
-    return url;
-  }
-  function releaseBlobUrl(blob) {
-    const url = blob && urlCache.get(blob);
-    if (url) {
-      URL.revokeObjectURL(url);
-      urlCache.delete(blob);
-    }
-  }
-
   const $ = (sel, root = document) => root.querySelector(sel);
   const el = {
     list: $('#folder-list'),
@@ -43,6 +24,7 @@
     btnExport: $('#btn-export'),
     fileInput: $('#file-input'),
     dialog: $('#export-dialog'),
+    viewer: $('#viewer'),
     toast: $('#toast'),
   };
 
@@ -51,18 +33,51 @@
 
   const current = () => state.characters.find((c) => c.id === state.selectedId) || null;
   const displayName = (c) => c.name.trim() || c.englishName.trim() || '未命名角色';
+  const allImageIds = (c) => IMAGE_FIELDS.flatMap((f) => c[f].map((img) => img.id));
+  const errMsg = (err) => (err && err.message) || String(err);
 
-  /** 舊版資料（每欄一張圖）→ 新版（每欄多張圖的陣列） */
-  function normalize(c) {
-    TEXT_FIELDS.forEach((f) => (c[f] = c[f] || ''));
-    c.dialogues = c.dialogues || [];
-    for (const f of IMAGE_FIELDS) {
-      const v = c[f];
-      if (!v) c[f] = [];
-      else if (!Array.isArray(v)) c[f] = [{ id: uid(), ...v }];
+  // ---------- 圖片網址（從 IndexedDB 讀出後建立 object URL，並快取） ----------
+  const urlCache = new Map(); // imageId -> Promise<string|null>
+
+  function imageUrl(img) {
+    if (img.broken) return Promise.resolve(null);
+    let p = urlCache.get(img.id);
+    if (!p) {
+      p = CharDB.getImage(img.id)
+        .then((rec) => (rec && rec.data ? URL.createObjectURL(new Blob([rec.data], { type: rec.mimeType || img.mimeType })) : null))
+        .catch((err) => {
+          console.error(err);
+          return null;
+        });
+      urlCache.set(img.id, p);
     }
-    return c;
+    return p;
   }
+
+  function cacheUrlFromData(id, data, type) {
+    urlCache.set(id, Promise.resolve(URL.createObjectURL(new Blob([data], { type }))));
+  }
+
+  function releaseUrl(id) {
+    const p = urlCache.get(id);
+    if (!p) return;
+    urlCache.delete(id);
+    p.then((url) => url && URL.revokeObjectURL(url));
+  }
+
+  /** 只保留目前角色與左側縮圖用到的圖片網址，其他釋放掉（手機記憶體有限） */
+  function pruneUrls() {
+    const keep = new Set();
+    const c = current();
+    if (c) allImageIds(c).forEach((id) => keep.add(id));
+    state.characters.forEach((x) => {
+      const t = thumbOf(x);
+      if (t) keep.add(t.id);
+    });
+    [...urlCache.keys()].forEach((id) => keep.has(id) || releaseUrl(id));
+  }
+
+  const thumbOf = (c) => c.icon.find((i) => !i.broken) || c.head.find((i) => !i.broken) || null;
 
   // ---------- Toast ----------
   let toastTimer;
@@ -71,41 +86,65 @@
     el.toast.classList.toggle('is-error', !!isError);
     el.toast.classList.add('is-visible');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => el.toast.classList.remove('is-visible'), 2600);
+    toastTimer = setTimeout(() => el.toast.classList.remove('is-visible'), isError ? 5000 : 2600);
   }
 
-  // ---------- 儲存（防抖） ----------
+  // ---------- 儲存 ----------
   const pendingSaves = new Map();
+
+  function save(character, ops) {
+    setSaveState('儲存中…');
+    return CharDB.put(character, ops)
+      .then(() => {
+        if (!pendingSaves.size) setSaveState('已自動儲存');
+      })
+      .catch((err) => {
+        console.error(err);
+        setSaveState('儲存失敗');
+        toast('儲存失敗：' + errMsg(err), true);
+        throw err;
+      });
+  }
+
+  /** 文字修改：防抖後儲存 */
   function scheduleSave(character, immediate) {
     character.updatedAt = Date.now();
-    setSaveState('儲存中…');
     clearTimeout(pendingSaves.get(character.id));
-    const doSave = () => {
+    if (immediate) {
       pendingSaves.delete(character.id);
-      CharDB.put(character)
-        .then(() => {
-          if (!pendingSaves.size) setSaveState('已自動儲存');
-        })
-        .catch((err) => {
-          console.error(err);
-          setSaveState('儲存失敗');
-          toast('儲存失敗：' + (err && err.message ? err.message : err), true);
-        });
-    };
-    if (immediate) doSave();
-    else pendingSaves.set(character.id, setTimeout(doSave, SAVE_DELAY));
+      save(character).catch(() => {});
+      return;
+    }
+    setSaveState('儲存中…');
+    pendingSaves.set(
+      character.id,
+      setTimeout(() => {
+        pendingSaves.delete(character.id);
+        save(character).catch(() => {});
+      }, SAVE_DELAY)
+    );
   }
+
   function flushSaves() {
     for (const [id, timer] of pendingSaves) {
       clearTimeout(timer);
       const c = state.characters.find((x) => x.id === id);
-      if (c) CharDB.put(c);
+      if (c) CharDB.put(c).catch(() => {});
     }
     pendingSaves.clear();
   }
+
   function setSaveState(text) {
     const node = el.editor.querySelector('[data-bind="saveState"]');
     if (node) node.textContent = text;
+  }
+
+  /** 請瀏覽器把資料標記為「持久保存」，降低被系統自動清除的機會 */
+  let persistAsked = false;
+  function requestPersist() {
+    if (persistAsked || !navigator.storage || !navigator.storage.persist) return;
+    persistAsked = true;
+    navigator.storage.persisted().then((ok) => ok || navigator.storage.persist()).catch(() => {});
   }
 
   // ---------- 左側資料夾列表 ----------
@@ -123,18 +162,20 @@
         btn.className = 'folder' + (c.id === state.selectedId ? ' is-active' : '');
         btn.dataset.id = c.id;
 
-        const thumb = c.icon[0] || c.head[0];
+        btn.insertAdjacentHTML(
+          'beforeend',
+          '<svg class="folder-thumb folder-thumb-svg" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>'
+        );
+        const thumb = thumbOf(c);
         if (thumb) {
-          const img = document.createElement('img');
-          img.className = 'folder-thumb';
-          img.alt = '';
-          img.src = blobUrl(thumb.blob);
-          btn.appendChild(img);
-        } else {
-          btn.insertAdjacentHTML(
-            'beforeend',
-            '<svg class="folder-thumb folder-thumb-svg" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>'
-          );
+          imageUrl(thumb).then((url) => {
+            if (!url || !btn.isConnected) return;
+            const img = document.createElement('img');
+            img.className = 'folder-thumb';
+            img.alt = '';
+            img.src = url;
+            btn.firstElementChild.replaceWith(img);
+          });
         }
 
         const text = document.createElement('span');
@@ -251,19 +292,34 @@
 
     const tiles = images.map((img, i) => {
       const tile = document.createElement('div');
-      tile.className = 'tile';
+      tile.className = 'tile is-loading';
 
-      const link = document.createElement('a');
-      link.className = 'tile-link';
-      link.href = blobUrl(img.blob);
-      link.target = '_blank';
-      link.rel = 'noopener';
-      link.title = `開啟原圖：${img.fileName}`;
+      const view = document.createElement('button');
+      view.type = 'button';
+      view.className = 'tile-link';
+      view.title = `放大檢視：${img.fileName}`;
       const pic = document.createElement('img');
-      pic.src = link.href;
       pic.alt = img.fileName;
-      pic.loading = 'lazy';
-      link.appendChild(pic);
+      view.appendChild(pic);
+
+      const markBroken = () => {
+        tile.classList.remove('is-loading');
+        tile.classList.add('is-broken');
+        view.disabled = true;
+        view.replaceChildren();
+        view.insertAdjacentHTML(
+          'beforeend',
+          '<span class="tile-broken"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>無法讀取<br>請移除後重新上傳</span>'
+        );
+      };
+
+      imageUrl(img).then((url) => {
+        if (!url) return markBroken();
+        pic.onload = () => tile.classList.remove('is-loading');
+        pic.onerror = markBroken;
+        pic.src = url;
+        view.addEventListener('click', () => openViewer(url, img.fileName));
+      });
 
       const tools = document.createElement('div');
       tools.className = 'tile-tools';
@@ -287,12 +343,19 @@
       remove.className = 'chip chip-danger';
       remove.textContent = '移除';
       remove.setAttribute('aria-label', `移除 ${img.fileName}`);
-      remove.addEventListener('click', () => {
-        c[field] = c[field].filter((x) => x.id !== img.id);
-        releaseBlobUrl(img.blob);
+      remove.addEventListener('click', async () => {
+        const before = c[field];
+        c[field] = before.filter((x) => x.id !== img.id);
+        c.updatedAt = Date.now();
+        try {
+          await save(c, { deleteImageIds: [img.id] });
+        } catch (_) {
+          c[field] = before;
+          return;
+        }
+        releaseUrl(img.id);
         renderGallery(block, c, field);
         renderList();
-        scheduleSave(c, true);
       });
       tools.appendChild(remove);
 
@@ -301,7 +364,7 @@
       name.textContent = `${i + 1}. ${img.fileName}`;
       name.title = img.fileName;
 
-      tile.append(link, tools, name);
+      tile.append(view, tools, name);
       return tile;
     });
 
@@ -319,10 +382,11 @@
   }
 
   function pickFiles(onPick) {
-    el.fileInput.value = '';
     el.fileInput.onchange = () => {
-      if (el.fileInput.files && el.fileInput.files.length) onPick(el.fileInput.files);
+      const files = Array.from(el.fileInput.files || []);
+      if (files.length) onPick(files);
     };
+    el.fileInput.value = '';
     el.fileInput.click();
   }
 
@@ -330,6 +394,7 @@
   const EXT_MIME = {
     png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
     webp: 'image/webp', svg: 'image/svg+xml', bmp: 'image/bmp', avif: 'image/avif',
+    heic: 'image/heic', heif: 'image/heif',
   };
   function imageType(file) {
     if (file.type) return file.type.startsWith('image/') ? file.type : '';
@@ -337,29 +402,90 @@
     return (ext && EXT_MIME[ext.toLowerCase()]) || '';
   }
 
-  function addImages(c, field, fileList, rerender) {
+  /** 讀取檔案內容；舊版瀏覽器沒有 File.arrayBuffer 時改用 FileReader */
+  function readFile(file) {
+    if (file.arrayBuffer) return file.arrayBuffer();
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsArrayBuffer(file);
+    });
+  }
+
+  let uploading = 0;
+  async function addImages(c, field, fileList, rerender) {
     const files = Array.from(fileList || []);
     const images = files.filter((f) => imageType(f));
     if (files.length && !images.length) {
       toast('只能上傳圖片檔案', true);
       return;
     }
-    if (images.length < files.length) toast(`已略過 ${files.length - images.length} 個非圖片檔案`, true);
-    for (const file of images) {
-      // 存成獨立 Blob（不保留 File 物件的其他屬性）
-      const type = imageType(file);
-      c[field].push({
-        id: uid(),
-        blob: file.slice(0, file.size, type),
-        fileName: file.name,
-        mimeType: type,
-      });
-    }
     if (!images.length) return;
-    rerender();
-    renderList();
-    scheduleSave(c, true);
+    requestPersist();
+
+    uploading++;
+    setSaveState(`讀取 ${images.length} 張圖片中…`);
+    // 立刻把檔案內容讀進記憶體（iPhone 的暫存檔之後可能會被系統刪除）
+    const results = await Promise.all(
+      images.map((file) =>
+        readFile(file).then(
+          (data) => ({ file, data }),
+          (err) => ({ file, err })
+        )
+      )
+    );
+    uploading--;
+
+    const ok = results.filter((r) => r.data);
+    const failed = results.filter((r) => r.err);
+    const skipped = files.length - images.length;
+
+    if (ok.length) {
+      const metas = [];
+      const records = [];
+      for (const { file, data } of ok) {
+        const id = uid();
+        const type = imageType(file);
+        metas.push({ id, fileName: file.name || `image_${metas.length + 1}`, mimeType: type, size: data.byteLength });
+        records.push({ id, data, mimeType: type });
+      }
+      c[field].push(...metas);
+      c.updatedAt = Date.now();
+      try {
+        await save(c, { addImages: records });
+        records.forEach((r) => cacheUrlFromData(r.id, r.data, r.mimeType));
+      } catch (_) {
+        // 儲存失敗：還原，不要讓畫面顯示沒存起來的圖片
+        const ids = new Set(metas.map((m) => m.id));
+        c[field] = c[field].filter((m) => !ids.has(m.id));
+      }
+      if (current() === c) rerender();
+      renderList();
+    } else if (!uploading) {
+      setSaveState('');
+    }
+
+    if (failed.length) {
+      console.error(failed.map((f) => f.err));
+      toast(`有 ${failed.length} 張圖片讀取失敗，請重新選擇：${failed.map((f) => f.file.name).join('、')}`, true);
+    } else if (skipped) {
+      toast(`已略過 ${skipped} 個非圖片檔案`, true);
+    }
   }
+
+  // ---------- 圖片檢視 ----------
+  function openViewer(url, name) {
+    el.viewer.querySelector('[data-bind="img"]').src = url;
+    el.viewer.querySelector('[data-bind="img"]').alt = name;
+    el.viewer.querySelector('[data-bind="name"]').textContent = name;
+    el.viewer.showModal();
+  }
+  el.viewer.querySelector('[data-action="close"]').addEventListener('click', () => el.viewer.close());
+  el.viewer.addEventListener('click', (e) => {
+    if (e.target === el.viewer || e.target.tagName === 'IMG') el.viewer.close();
+  });
+  el.viewer.addEventListener('close', () => el.viewer.querySelector('[data-bind="img"]').removeAttribute('src'));
 
   // ---------- 對話 ----------
   function renderDialogues(root, c) {
@@ -420,7 +546,7 @@
   // ---------- 角色 CRUD ----------
   function newCharacter() {
     const now = Date.now();
-    const c = normalize({ id: uid(), createdAt: now, updatedAt: now });
+    const c = { id: uid(), name: '', englishName: '', description: '', icon: [], head: [], picture: [], dialogues: [], createdAt: now, updatedAt: now };
     state.characters.push(c);
     state.selectedId = c.id;
     state.query = '';
@@ -436,13 +562,14 @@
     if (!confirm(`確定要刪除「${displayName(c)}」這個角色資料夾嗎？\n刪除後無法復原。`)) return;
     clearTimeout(pendingSaves.get(c.id));
     pendingSaves.delete(c.id);
+    const ids = allImageIds(c);
     try {
-      await CharDB.remove(c.id);
+      await CharDB.remove(c.id, ids);
     } catch (err) {
-      toast('刪除失敗：' + err.message, true);
+      toast('刪除失敗：' + errMsg(err), true);
       return;
     }
-    IMAGE_FIELDS.forEach((f) => c[f].forEach((img) => releaseBlobUrl(img.blob)));
+    ids.forEach(releaseUrl);
     const idx = state.characters.indexOf(c);
     state.characters.splice(idx, 1);
     const next = state.characters[idx] || state.characters[idx - 1];
@@ -455,6 +582,7 @@
   function select(id) {
     if (id === state.selectedId) return;
     state.selectedId = id;
+    pruneUrls();
     renderList();
     renderEditor();
     el.editor.scrollTop = 0;
@@ -508,25 +636,102 @@
     }
     exportError('');
     el.dialog.close('export');
+    flushSaves();
 
     const scope = form.querySelector('input[name="scope"]:checked').value;
     const c = current();
     const safe = (s) => s.replace(/[\\/:*?"<>|\s]+/g, '_').slice(0, 60);
     const baseName = scope === 'current' && c ? `character_${safe(c.englishName || c.name || c.id)}` : undefined;
+    if (images) toast('正在打包圖片…');
     try {
-      const files = await CharExport.exportCharacters(list, {
+      const { files, missing } = await CharExport.exportCharacters(list, {
         text: text === 'none' ? null : text,
         images,
         baseName,
       });
-      let msg = `已匯出 ${files.join('、')}`;
+      let msg = files.length ? `已匯出 ${files.join('、')}` : '沒有可匯出的檔案';
       if (images && !files.some((f) => f.endsWith('.zip'))) msg += '（沒有圖片，未產生 ZIP）';
-      toast(msg);
+      if (missing) msg += `；有 ${missing} 張圖片無法讀取，已略過`;
+      toast(msg, !!missing);
     } catch (err) {
       console.error(err);
-      toast('匯出失敗：' + err.message, true);
+      toast('匯出失敗：' + errMsg(err), true);
     }
   }
+
+  // ---------- 啟動：讀取資料，並把舊版格式轉成新版 ----------
+
+  /**
+   * v1：圖片欄位是單一物件 { blob, fileName, mimeType }
+   * v1.1：圖片欄位是陣列 [{ id, blob, fileName, mimeType }]
+   * v2（現在）：圖片欄位只有中繼資料，圖片本體在 images store
+   */
+  async function migrate(c) {
+    let changed = false;
+    TEXT_FIELDS.forEach((f) => (c[f] = c[f] || ''));
+    c.dialogues = c.dialogues || [];
+    const addImages = [];
+    for (const f of IMAGE_FIELDS) {
+      let list = c[f];
+      if (!list) list = [];
+      else if (!Array.isArray(list)) {
+        list = [list];
+        changed = true;
+      }
+      const out = [];
+      for (const img of list) {
+        if (!img) continue;
+        const meta = {
+          id: img.id || uid(),
+          fileName: img.fileName || 'image',
+          mimeType: img.mimeType || (img.blob && img.blob.type) || '',
+          size: img.size || 0,
+        };
+        if (img.broken) meta.broken = true;
+        if ('blob' in img) {
+          changed = true;
+          try {
+            const data = await img.blob.arrayBuffer();
+            if (!data.byteLength) throw new Error('empty');
+            meta.size = data.byteLength;
+            addImages.push({ id: meta.id, data, mimeType: meta.mimeType });
+          } catch (err) {
+            console.warn('無法讀取舊圖片', meta.fileName, err);
+            meta.broken = true;
+          }
+        }
+        out.push(meta);
+      }
+      c[f] = out;
+    }
+    if (changed) await CharDB.put(c, { addImages });
+    return c;
+  }
+
+  (async function init() {
+    try {
+      const raw = await CharDB.getAll();
+      for (const c of raw) {
+        try {
+          state.characters.push(await migrate(c));
+        } catch (err) {
+          console.error('轉換資料失敗', c, err);
+          state.characters.push(c);
+        }
+      }
+      const broken = state.characters.reduce(
+        (n, c) => n + IMAGE_FIELDS.reduce((m, f) => m + c[f].filter((i) => i.broken).length, 0),
+        0
+      );
+      if (broken) toast(`有 ${broken} 張先前的圖片已無法讀取，請移除後重新上傳`, true);
+    } catch (err) {
+      console.error(err);
+      toast('無法讀取資料：' + errMsg(err), true);
+    }
+    state.selectedId = state.characters.length ? state.characters[0].id : null;
+    renderList();
+    renderEditor();
+  })();
 
   // ---------- 事件 ----------
   el.btnNew.addEventListener('click', newCharacter);
@@ -545,23 +750,11 @@
     exportError('');
   });
   window.addEventListener('beforeunload', flushSaves);
+  window.addEventListener('pagehide', flushSaves);
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') flushSaves();
   });
   // 拖曳圖片到圖片區以外的地方時，不要讓瀏覽器直接開啟該圖片
   window.addEventListener('dragover', (e) => e.preventDefault());
   window.addEventListener('drop', (e) => e.preventDefault());
-
-  // ---------- 啟動 ----------
-  (async function init() {
-    try {
-      state.characters = (await CharDB.getAll()).map(normalize);
-    } catch (err) {
-      console.error(err);
-      toast('無法讀取資料：' + err.message, true);
-    }
-    state.selectedId = state.characters.length ? state.characters[0].id : null;
-    renderList();
-    renderEditor();
-  })();
 })();
