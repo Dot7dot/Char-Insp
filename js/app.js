@@ -26,6 +26,11 @@
     dialog: $('#export-dialog'),
     viewer: $('#viewer'),
     toast: $('#toast'),
+    btnBackup: $('#btn-backup'),
+    btnRestore: $('#btn-restore'),
+    backupInput: $('#backup-input'),
+    backupStatus: $('#backup-status'),
+    restoreDialog: $('#restore-dialog'),
   };
 
   const uid = () =>
@@ -81,12 +86,13 @@
 
   // ---------- Toast ----------
   let toastTimer;
-  function toast(msg, isError) {
+  /** sticky：不自動消失（用於顯示進度） */
+  function toast(msg, isError, sticky) {
     el.toast.textContent = msg;
     el.toast.classList.toggle('is-error', !!isError);
     el.toast.classList.add('is-visible');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => el.toast.classList.remove('is-visible'), isError ? 5000 : 2600);
+    if (!sticky) toastTimer = setTimeout(() => el.toast.classList.remove('is-visible'), isError ? 6000 : 3000);
   }
 
   // ---------- 儲存 ----------
@@ -201,6 +207,7 @@
     } else {
       el.count.textContent = `共 ${state.characters.length} 個角色`;
     }
+    renderBackupStatus();
   }
 
   // ---------- 右側編輯器 ----------
@@ -708,30 +715,198 @@
     return c;
   }
 
-  (async function init() {
+  /** 從資料庫讀取所有角色（啟動時、還原備份後） */
+  async function loadAll(preferId) {
+    flushSaves();
+    [...urlCache.keys()].forEach(releaseUrl);
+    const loaded = [];
     try {
       const raw = await CharDB.getAll();
       for (const c of raw) {
         try {
-          state.characters.push(await migrate(c));
+          loaded.push(await migrate(c));
         } catch (err) {
           console.error('轉換資料失敗', c, err);
-          state.characters.push(c);
+          loaded.push(c);
         }
       }
-      const broken = state.characters.reduce(
-        (n, c) => n + IMAGE_FIELDS.reduce((m, f) => m + c[f].filter((i) => i.broken).length, 0),
-        0
-      );
-      if (broken) toast(`有 ${broken} 張先前的圖片已無法讀取，請移除後重新上傳`, true);
     } catch (err) {
       console.error(err);
       toast('無法讀取資料：' + errMsg(err), true);
     }
-    state.selectedId = state.characters.length ? state.characters[0].id : null;
+    state.characters = loaded;
+    const keep = loaded.find((c) => c.id === preferId);
+    state.selectedId = keep ? keep.id : loaded.length ? loaded[0].id : null;
     renderList();
     renderEditor();
-  })();
+    renderBackupStatus();
+    return loaded;
+  }
+
+  const countBroken = () =>
+    state.characters.reduce(
+      (n, c) => n + IMAGE_FIELDS.reduce((m, f) => m + c[f].filter((i) => i.broken).length, 0),
+      0
+    );
+
+  // ---------- 完整備份 / 匯入還原 ----------
+  const DAY = 24 * 60 * 60 * 1000;
+
+  function renderBackupStatus() {
+    const last = CharBackup.getLastBackupAt();
+    let text;
+    let warn = false;
+    if (!last) {
+      text = '這台裝置還沒有備份過';
+      warn = state.characters.length > 0;
+    } else {
+      const days = Math.floor((Date.now() - last) / DAY);
+      const d = new Date(last);
+      const pad = (n) => String(n).padStart(2, '0');
+      const when = `${d.getFullYear()}/${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+      text = `上次備份：${when}` + (days >= 1 ? `（${days} 天前）` : '');
+      warn = days >= 7;
+    }
+    if (warn) text += ' · 建議現在備份';
+    el.backupStatus.textContent = text;
+    el.backupStatus.classList.toggle('is-warn', warn);
+  }
+
+  let busy = false;
+
+  async function doBackup() {
+    if (busy) return;
+    if (!state.characters.length) {
+      toast('目前沒有角色可以備份', true);
+      return;
+    }
+    busy = true;
+    el.btnBackup.disabled = true;
+    flushSaves();
+    toast('正在建立備份…', false, true);
+    try {
+      const result = await CharBackup.createBackup(state.characters, (done, total) =>
+        toast(`正在建立備份…（圖片 ${done} / ${total}）`, false, true)
+      );
+      CharExport.download(result.blob, result.fileName);
+      CharBackup.setLastBackupAt(Date.now());
+      renderBackupStatus();
+      let msg = `已下載 ${result.fileName}（${result.characters} 個角色、${result.images} 張圖片）`;
+      if (result.missing) msg += `；有 ${result.missing} 張圖片已無法讀取，未包含在備份中`;
+      toast(msg, !!result.missing);
+    } catch (err) {
+      console.error(err);
+      toast('備份失敗：' + errMsg(err), true);
+    } finally {
+      busy = false;
+      el.btnBackup.disabled = false;
+    }
+  }
+
+  const restoreForm = el.restoreDialog.querySelector('form');
+  const rBind = (name) => restoreForm.querySelector(`[data-bind="${name}"]`);
+  let pendingBackup = null;
+  let restoring = false;
+
+  function restoreMessage(kind, msg) {
+    const node = rBind(kind);
+    node.textContent = msg || '';
+    node.hidden = !msg;
+  }
+
+  function pickBackupFile() {
+    if (busy) return;
+    el.backupInput.onchange = async () => {
+      const file = el.backupInput.files && el.backupInput.files[0];
+      if (!file) return;
+      toast('正在讀取備份檔…', false, true);
+      try {
+        pendingBackup = await CharBackup.readBackup(file);
+      } catch (err) {
+        console.warn(err);
+        toast(errMsg(err), true);
+        return;
+      }
+      el.toast.classList.remove('is-visible');
+      const m = pendingBackup.manifest;
+      rBind('fileName').textContent = file.name;
+      rBind('createdAt').textContent = m.createdAt ? new Date(m.createdAt).toLocaleString() : '未知';
+      rBind('contents').textContent = `${m.characters.length} 個角色、${pendingBackup.imageCount} 張圖片`;
+      rBind('currentCount').textContent = state.characters.length;
+      restoreForm.querySelector('input[name="mode"][value="merge"]').checked = true;
+      restoreMessage('progress', '');
+      restoreMessage('error', '');
+      setRestoreBusy(false);
+      el.restoreDialog.showModal();
+    };
+    el.backupInput.value = '';
+    el.backupInput.click();
+  }
+
+  function setRestoreBusy(on) {
+    restoring = on;
+    restoreForm.querySelectorAll('button, input').forEach((x) => (x.disabled = on));
+  }
+
+  async function doRestore() {
+    if (!pendingBackup || restoring) return;
+    const mode = restoreForm.querySelector('input[name="mode"]:checked').value;
+    if (mode === 'replace') {
+      const backupIds = new Set(pendingBackup.manifest.characters.map((c) => String(c.id)));
+      const willRemove = state.characters.filter((c) => !backupIds.has(c.id));
+      if (
+        willRemove.length &&
+        !confirm(`「全部取代」會刪除 ${willRemove.length} 個備份裡沒有的角色：\n${willRemove.map(displayName).slice(0, 10).join('、')}${willRemove.length > 10 ? '…' : ''}\n\n確定要繼續嗎？`)
+      ) {
+        return;
+      }
+    }
+
+    setRestoreBusy(true);
+    busy = true;
+    restoreMessage('error', '');
+    restoreMessage('progress', '還原中，請不要關閉頁面…');
+    const prevSelected = state.selectedId;
+    try {
+      flushSaves();
+      const r = await CharBackup.restoreBackup(pendingBackup, mode, state.characters, (done, total) =>
+        restoreMessage('progress', `還原中，請不要關閉頁面…（圖片 ${done} / ${total}）`)
+      );
+      pendingBackup = null;
+      requestPersist();
+      await loadAll(prevSelected);
+      el.restoreDialog.close();
+      const parts = [`已還原 ${r.characters} 個角色`];
+      if (r.added) parts.push(`新增 ${r.added}`);
+      if (r.replaced) parts.push(`覆蓋 ${r.replaced}`);
+      if (r.removed) parts.push(`刪除 ${r.removed}`);
+      let msg = parts.join('，');
+      if (r.missing) msg += `；有 ${r.missing} 張圖片無法讀取，請重新上傳`;
+      toast(msg, !!r.missing);
+    } catch (err) {
+      console.error(err);
+      restoreMessage('progress', '');
+      restoreMessage('error', '還原失敗：' + errMsg(err) + '。已還原的部分會保留，目前的其他資料沒有被刪除。');
+      await loadAll(prevSelected);
+    } finally {
+      busy = false;
+      setRestoreBusy(false);
+    }
+  }
+
+  restoreForm.querySelector('[data-action="confirm-restore"]').addEventListener('click', doRestore);
+  // 還原進行中不允許用 Esc 關閉
+  el.restoreDialog.addEventListener('cancel', (e) => restoring && e.preventDefault());
+  el.restoreDialog.addEventListener('close', () => {
+    if (!restoring) pendingBackup = null;
+  });
+  el.btnBackup.addEventListener('click', doBackup);
+  el.btnRestore.addEventListener('click', pickBackupFile);
+
+  loadAll().then(() => {
+    const broken = countBroken();
+    if (broken) toast(`有 ${broken} 張先前的圖片已無法讀取，請移除後重新上傳`, true);
+  });
 
   // ---------- 事件 ----------
   el.btnNew.addEventListener('click', newCharacter);

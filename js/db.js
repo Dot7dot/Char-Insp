@@ -88,8 +88,9 @@
     put(character, ops = {}) {
       return run([CHARS, IMAGES], 'readwrite', (t) => {
         const images = t.objectStore(IMAGES);
-        (ops.addImages || []).forEach((img) => images.put(img));
+        // 先刪除再新增：同一個 id 同時出現在兩邊時（例如還原備份覆蓋自己），結果是「新增」
         (ops.deleteImageIds || []).forEach((id) => images.delete(id));
+        (ops.addImages || []).forEach((img) => images.put(img));
         t.objectStore(CHARS).put(character);
       });
     },
