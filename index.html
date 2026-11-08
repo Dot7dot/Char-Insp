@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>角色靈感庫 Char-Insp</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div class="app">
+    <!-- 左側：角色資料夾列表 -->
+    <aside class="sidebar">
+      <header class="sidebar-header">
+        <h1 class="brand">角色靈感庫</h1>
+        <button id="btn-export" class="btn btn-ghost" type="button" title="匯出 JSON / CSV / 圖片 ZIP">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0-4-4m4 4 4-4M5 21h14"/></svg>
+          匯出
+        </button>
+      </header>
+
+      <button id="btn-new" class="btn btn-primary btn-block" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        新增角色資料夾
+      </button>
+
+      <input id="search" class="search" type="search" placeholder="搜尋角色名稱…" autocomplete="off">
+
+      <ul id="folder-list" class="folder-list" aria-label="角色資料夾"></ul>
+      <p id="folder-count" class="folder-count"></p>
+    </aside>
+
+    <!-- 右側：角色內容 -->
+    <main id="editor" class="editor" aria-live="polite"></main>
+  </div>
+
+  <!-- 空狀態 -->
+  <template id="tpl-empty">
+    <div class="empty">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+      <h2>還沒有選擇角色</h2>
+      <p>點左邊的「新增角色資料夾」建立第一個角色，或從列表中選一個。</p>
+    </div>
+  </template>
+
+  <!-- 角色編輯畫面 -->
+  <template id="tpl-editor">
+    <div class="editor-inner">
+      <header class="editor-header">
+        <div class="editor-title">
+          <svg class="folder-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+          <h2 data-bind="title"></h2>
+        </div>
+        <div class="editor-actions">
+          <span class="save-state" data-bind="saveState"></span>
+          <button class="btn btn-danger-ghost" type="button" data-action="delete">刪除角色</button>
+        </div>
+      </header>
+
+      <section class="card">
+        <h3 class="card-title">基本資料</h3>
+        <div class="grid-2">
+          <label class="field">
+            <span class="field-label">Name <small>名稱</small></span>
+            <input type="text" data-field="name" placeholder="例如：艾莉絲" maxlength="120">
+          </label>
+          <label class="field">
+            <span class="field-label">English Name <small>英文名稱</small></span>
+            <input type="text" data-field="englishName" placeholder="e.g. Alice" maxlength="120">
+          </label>
+        </div>
+        <label class="field">
+          <span class="field-label">Description <small>描述</small></span>
+          <textarea data-field="description" rows="5" placeholder="個性、背景故事、外觀特徵、能力……"></textarea>
+        </label>
+      </section>
+
+      <section class="card">
+        <h3 class="card-title">圖片</h3>
+        <div class="gallery" data-image="icon">
+          <div class="gallery-head">
+            <span class="field-label">Icon <small>小標誌</small></span>
+            <span class="badge" data-bind="count"></span>
+          </div>
+          <div class="gallery-grid gallery-icon" data-bind="grid"></div>
+        </div>
+        <div class="gallery" data-image="head">
+          <div class="gallery-head">
+            <span class="field-label">Head <small>大頭照</small></span>
+            <span class="badge" data-bind="count"></span>
+          </div>
+          <div class="gallery-grid gallery-head-grid" data-bind="grid"></div>
+        </div>
+        <div class="gallery" data-image="picture">
+          <div class="gallery-head">
+            <span class="field-label">Picture <small>角色詳細圖</small></span>
+            <span class="badge" data-bind="count"></span>
+          </div>
+          <div class="gallery-grid gallery-picture" data-bind="grid"></div>
+        </div>
+        <p class="hint">每一類都可以上傳多張。點「＋」或把圖片拖曳進來（可一次選多張）；點縮圖可開啟原圖。支援 PNG / JPG / GIF / WebP / SVG。</p>
+      </section>
+
+      <section class="card">
+        <h3 class="card-title">Dialogue <small>對話</small> <span class="badge" data-bind="dialogueCount"></span></h3>
+        <ol class="dialogue-list" data-bind="dialogueList"></ol>
+        <div class="dialogue-add">
+          <textarea data-bind="dialogueInput" rows="2" placeholder="輸入一句新對話… (Ctrl / ⌘ + Enter 快速新增)"></textarea>
+          <button class="btn btn-primary" type="button" data-action="add-dialogue">新增對話</button>
+        </div>
+      </section>
+    </div>
+  </template>
+
+  <!-- 匯出視窗 -->
+  <dialog id="export-dialog" class="dialog">
+    <form method="dialog" class="dialog-body">
+      <h2>匯出角色資料</h2>
+
+      <fieldset class="choice-group">
+        <legend>匯出範圍</legend>
+        <label class="choice">
+          <input type="radio" name="scope" value="all" checked>
+          <span><strong>全部角色</strong> <small data-bind="countAll"></small></span>
+        </label>
+        <label class="choice">
+          <input type="radio" name="scope" value="current">
+          <span><strong>目前選擇的角色</strong> <small data-bind="currentName"></small></span>
+        </label>
+      </fieldset>
+
+      <fieldset class="choice-group">
+        <legend>文字資料 <small>（Name、English Name、Description、Dialogue，不含圖片）</small></legend>
+        <label class="choice">
+          <input type="radio" name="text" value="json" checked>
+          <span>
+            <strong>JSON</strong>
+            <small>適合直接匯入遊戲引擎，保留完整結構</small>
+          </span>
+        </label>
+        <label class="choice">
+          <input type="radio" name="text" value="csv">
+          <span>
+            <strong>CSV</strong>
+            <small>適合用 Excel / Google 試算表檢視、整理</small>
+          </span>
+        </label>
+        <label class="choice">
+          <input type="radio" name="text" value="none">
+          <span>
+            <strong>不匯出文字</strong>
+            <small>只下載圖片 ZIP</small>
+          </span>
+        </label>
+      </fieldset>
+
+      <fieldset class="choice-group">
+        <legend>圖片</legend>
+        <label class="check">
+          <input type="checkbox" name="images">
+          <span>
+            <span>同時匯出圖片（ZIP） <small data-bind="imageCount"></small></span>
+            <small>每個角色一個資料夾，內含 icon / head / picture 子資料夾。</small>
+          </span>
+        </label>
+      </fieldset>
+
+      <p class="dialog-error" data-bind="error" hidden></p>
+
+      <menu class="dialog-actions">
+        <button class="btn btn-ghost" value="cancel" type="submit">取消</button>
+        <button class="btn btn-primary" type="button" data-action="confirm-export">匯出</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <input id="file-input" type="file" accept="image/*" multiple hidden>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script src="js/db.js"></script>
+  <script src="js/zip.js"></script>
+  <script src="js/export.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
