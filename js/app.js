@@ -4,7 +4,7 @@
 (function () {
   'use strict';
 
-  const IMAGE_FIELDS = ['icon', 'picture', 'head'];
+  const IMAGE_FIELDS = ['icon', 'head', 'picture'];
   const TEXT_FIELDS = ['name', 'englishName', 'description'];
   const SAVE_DELAY = 400;
 
@@ -51,6 +51,18 @@
 
   const current = () => state.characters.find((c) => c.id === state.selectedId) || null;
   const displayName = (c) => c.name.trim() || c.englishName.trim() || '未命名角色';
+
+  /** 舊版資料（每欄一張圖）→ 新版（每欄多張圖的陣列） */
+  function normalize(c) {
+    TEXT_FIELDS.forEach((f) => (c[f] = c[f] || ''));
+    c.dialogues = c.dialogues || [];
+    for (const f of IMAGE_FIELDS) {
+      const v = c[f];
+      if (!v) c[f] = [];
+      else if (!Array.isArray(v)) c[f] = [{ id: uid(), ...v }];
+    }
+    return c;
+  }
 
   // ---------- Toast ----------
   let toastTimer;
@@ -111,7 +123,7 @@
         btn.className = 'folder' + (c.id === state.selectedId ? ' is-active' : '');
         btn.dataset.id = c.id;
 
-        const thumb = c.icon || c.head;
+        const thumb = c.icon[0] || c.head[0];
         if (thumb) {
           const img = document.createElement('img');
           img.className = 'folder-thumb';
@@ -176,7 +188,7 @@
     }
 
     for (const field of IMAGE_FIELDS) {
-      renderImageSlot(root.querySelector(`[data-image="${field}"]`), c, field);
+      setupGallery(root.querySelector(`[data-image="${field}"]`), c, field);
     }
 
     renderDialogues(root, c);
@@ -210,89 +222,146 @@
     el.editor.replaceChildren(frag);
   }
 
-  function renderImageSlot(slot, c, field) {
-    const zone = slot.querySelector('.dropzone');
-    const img = c[field];
-    zone.replaceChildren();
-    zone.classList.toggle('has-image', !!img);
+  // ---------- 圖片（每一類可多張） ----------
+  function setupGallery(block, c, field) {
+    const render = () => renderGallery(block, c, field);
 
-    if (img) {
+    // 整個區塊都可以拖曳圖片進來
+    block.addEventListener('dragover', (e) => {
+      if (!e.dataTransfer || !Array.from(e.dataTransfer.types).includes('Files')) return;
+      e.preventDefault();
+      block.classList.add('is-dragover');
+    });
+    block.addEventListener('dragleave', (e) => {
+      if (!block.contains(e.relatedTarget)) block.classList.remove('is-dragover');
+    });
+    block.addEventListener('drop', (e) => {
+      e.preventDefault();
+      block.classList.remove('is-dragover');
+      addImages(c, field, e.dataTransfer.files, render);
+    });
+
+    render();
+  }
+
+  function renderGallery(block, c, field) {
+    const grid = block.querySelector('[data-bind="grid"]');
+    const images = c[field];
+    block.querySelector('[data-bind="count"]').textContent = images.length;
+
+    const tiles = images.map((img, i) => {
+      const tile = document.createElement('div');
+      tile.className = 'tile';
+
+      const link = document.createElement('a');
+      link.className = 'tile-link';
+      link.href = blobUrl(img.blob);
+      link.target = '_blank';
+      link.rel = 'noopener';
+      link.title = `開啟原圖：${img.fileName}`;
       const pic = document.createElement('img');
-      pic.src = blobUrl(img.blob);
-      pic.alt = field;
+      pic.src = link.href;
+      pic.alt = img.fileName;
+      pic.loading = 'lazy';
+      link.appendChild(pic);
+
       const tools = document.createElement('div');
-      tools.className = 'dropzone-tools';
-      const replace = document.createElement('button');
-      replace.type = 'button';
-      replace.className = 'chip';
-      replace.textContent = '更換';
+      tools.className = 'tile-tools';
+      if (i > 0) {
+        const left = document.createElement('button');
+        left.type = 'button';
+        left.className = 'chip';
+        left.textContent = '←';
+        left.title = '往前移';
+        left.setAttribute('aria-label', `把 ${img.fileName} 往前移`);
+        left.addEventListener('click', () => {
+          [images[i - 1], images[i]] = [images[i], images[i - 1]];
+          renderGallery(block, c, field);
+          renderList();
+          scheduleSave(c, true);
+        });
+        tools.appendChild(left);
+      }
       const remove = document.createElement('button');
       remove.type = 'button';
       remove.className = 'chip chip-danger';
       remove.textContent = '移除';
-      remove.addEventListener('click', (e) => {
-        e.stopPropagation();
+      remove.setAttribute('aria-label', `移除 ${img.fileName}`);
+      remove.addEventListener('click', () => {
+        c[field] = c[field].filter((x) => x.id !== img.id);
         releaseBlobUrl(img.blob);
-        c[field] = null;
-        renderImageSlot(slot, c, field);
+        renderGallery(block, c, field);
         renderList();
         scheduleSave(c, true);
       });
-      tools.append(replace, remove);
-      const name = document.createElement('span');
-      name.className = 'dropzone-filename';
-      name.textContent = img.fileName;
-      name.title = img.fileName;
-      zone.append(pic, tools, name);
-    } else {
-      zone.innerHTML =
-        '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 16l4.6-4.6a2 2 0 0 1 2.8 0L16 16m-2-2 1.6-1.6a2 2 0 0 1 2.8 0L20 14M14 8h.01M6 20h12a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2z"/></svg><span>上傳圖片</span>';
-    }
+      tools.appendChild(remove);
 
-    const pick = () => pickFile((file) => setImage(c, field, file, slot));
-    zone.onclick = pick;
-    zone.onkeydown = (e) => {
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        pick();
-      }
-    };
-    zone.ondragover = (e) => {
-      e.preventDefault();
-      zone.classList.add('is-dragover');
-    };
-    zone.ondragleave = () => zone.classList.remove('is-dragover');
-    zone.ondrop = (e) => {
-      e.preventDefault();
-      zone.classList.remove('is-dragover');
-      const file = e.dataTransfer.files && e.dataTransfer.files[0];
-      if (file) setImage(c, field, file, slot);
-    };
+      const name = document.createElement('span');
+      name.className = 'tile-filename';
+      name.textContent = `${i + 1}. ${img.fileName}`;
+      name.title = img.fileName;
+
+      tile.append(link, tools, name);
+      return tile;
+    });
+
+    const add = document.createElement('button');
+    add.type = 'button';
+    add.className = 'tile tile-add';
+    add.setAttribute('aria-label', '新增圖片');
+    add.innerHTML =
+      '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>新增圖片</span>';
+    add.addEventListener('click', () =>
+      pickFiles((files) => addImages(c, field, files, () => renderGallery(block, c, field)))
+    );
+
+    grid.replaceChildren(...tiles, add);
   }
 
-  function pickFile(onPick) {
+  function pickFiles(onPick) {
     el.fileInput.value = '';
     el.fileInput.onchange = () => {
-      const file = el.fileInput.files && el.fileInput.files[0];
-      if (file) onPick(file);
+      if (el.fileInput.files && el.fileInput.files.length) onPick(el.fileInput.files);
     };
     el.fileInput.click();
   }
 
-  function setImage(c, field, file, slot) {
-    if (!file.type.startsWith('image/')) {
+  // 某些系統不會提供檔案的 MIME type，這時依副檔名判斷
+  const EXT_MIME = {
+    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+    webp: 'image/webp', svg: 'image/svg+xml', bmp: 'image/bmp', avif: 'image/avif',
+  };
+  function imageType(file) {
+    if (file.type) return file.type.startsWith('image/') ? file.type : '';
+    const ext = (/\.([a-z0-9]+)$/i.exec(file.name) || [])[1];
+    return (ext && EXT_MIME[ext.toLowerCase()]) || '';
+  }
+
+  function addImages(c, field, fileList, rerender) {
+    const files = Array.from(fileList || []);
+    const images = files.filter((f) => imageType(f));
+    if (files.length && !images.length) {
       toast('只能上傳圖片檔案', true);
       return;
     }
-    if (c[field]) releaseBlobUrl(c[field].blob);
-    // 存成獨立 Blob（不保留 File 物件的其他屬性）
-    const blob = file.slice(0, file.size, file.type);
-    c[field] = { blob, fileName: file.name, mimeType: file.type };
-    renderImageSlot(slot, c, field);
+    if (images.length < files.length) toast(`已略過 ${files.length - images.length} 個非圖片檔案`, true);
+    for (const file of images) {
+      // 存成獨立 Blob（不保留 File 物件的其他屬性）
+      const type = imageType(file);
+      c[field].push({
+        id: uid(),
+        blob: file.slice(0, file.size, type),
+        fileName: file.name,
+        mimeType: type,
+      });
+    }
+    if (!images.length) return;
+    rerender();
     renderList();
     scheduleSave(c, true);
   }
 
+  // ---------- 對話 ----------
   function renderDialogues(root, c) {
     const list = root.querySelector('[data-bind="dialogueList"]');
     root.querySelector('[data-bind="dialogueCount"]').textContent = c.dialogues.length;
@@ -351,18 +420,7 @@
   // ---------- 角色 CRUD ----------
   function newCharacter() {
     const now = Date.now();
-    const c = {
-      id: uid(),
-      name: '',
-      englishName: '',
-      description: '',
-      icon: null,
-      picture: null,
-      head: null,
-      dialogues: [],
-      createdAt: now,
-      updatedAt: now,
-    };
+    const c = normalize({ id: uid(), createdAt: now, updatedAt: now });
     state.characters.push(c);
     state.selectedId = c.id;
     state.query = '';
@@ -384,7 +442,7 @@
       toast('刪除失敗：' + err.message, true);
       return;
     }
-    IMAGE_FIELDS.forEach((f) => c[f] && releaseBlobUrl(c[f].blob));
+    IMAGE_FIELDS.forEach((f) => c[f].forEach((img) => releaseBlobUrl(img.blob)));
     const idx = state.characters.indexOf(c);
     state.characters.splice(idx, 1);
     const next = state.characters[idx] || state.characters[idx - 1];
@@ -403,34 +461,67 @@
   }
 
   // ---------- 匯出 ----------
+  const form = el.dialog.querySelector('form');
+  const exportTargets = () => {
+    const scope = form.querySelector('input[name="scope"]:checked').value;
+    const c = current();
+    return scope === 'current' && c ? [c] : state.characters;
+  };
+  const updateImageCount = () => {
+    const n = CharExport.countImages(exportTargets());
+    form.querySelector('[data-bind="imageCount"]').textContent = `（${n} 張）`;
+  };
+  const exportError = (msg) => {
+    const node = form.querySelector('[data-bind="error"]');
+    node.textContent = msg || '';
+    node.hidden = !msg;
+  };
+
   function openExport() {
     if (!state.characters.length) {
       toast('目前沒有角色可以匯出', true);
       return;
     }
-    const form = el.dialog.querySelector('form');
     const c = current();
     form.querySelector('[data-bind="countAll"]').textContent = `（${state.characters.length} 個）`;
     form.querySelector('[data-bind="currentName"]').textContent = c ? `（${displayName(c)}）` : '（未選擇）';
-    const currentRadio = form.querySelector('input[name="scope"][value="current"]');
-    currentRadio.disabled = !c;
+    form.querySelector('input[name="scope"][value="current"]').disabled = !c;
     if (!c) form.querySelector('input[name="scope"][value="all"]').checked = true;
+    exportError('');
+    updateImageCount();
     el.dialog.returnValue = '';
     el.dialog.showModal();
   }
 
   async function doExport() {
-    const form = el.dialog.querySelector('form');
-    const format = form.querySelector('input[name="format"]:checked').value;
+    const text = form.querySelector('input[name="text"]:checked').value;
+    const images = form.querySelector('input[name="images"]').checked;
+    const list = exportTargets();
+
+    if (text === 'none' && !images) {
+      exportError('請至少選擇一種要匯出的內容（文字資料或圖片）。');
+      return;
+    }
+    if (text === 'none' && images && !CharExport.countImages(list)) {
+      exportError('選擇的角色沒有任何圖片可以匯出。');
+      return;
+    }
+    exportError('');
+    el.dialog.close('export');
+
     const scope = form.querySelector('input[name="scope"]:checked').value;
-    const embedImages = form.querySelector('input[name="embedImages"]').checked;
     const c = current();
-    const list = scope === 'current' && c ? [c] : state.characters;
     const safe = (s) => s.replace(/[\\/:*?"<>|\s]+/g, '_').slice(0, 60);
     const baseName = scope === 'current' && c ? `character_${safe(c.englishName || c.name || c.id)}` : undefined;
     try {
-      const fileName = await CharExport.exportCharacters(list, { format, embedImages, baseName });
-      toast(`已匯出 ${fileName}`);
+      const files = await CharExport.exportCharacters(list, {
+        text: text === 'none' ? null : text,
+        images,
+        baseName,
+      });
+      let msg = `已匯出 ${files.join('、')}`;
+      if (images && !files.some((f) => f.endsWith('.zip'))) msg += '（沒有圖片，未產生 ZIP）';
+      toast(msg);
     } catch (err) {
       console.error(err);
       toast('匯出失敗：' + err.message, true);
@@ -448,28 +539,23 @@
     state.query = el.search.value;
     renderList();
   });
-  el.dialog.addEventListener('close', () => {
-    if (el.dialog.returnValue === 'export') doExport();
+  form.querySelector('[data-action="confirm-export"]').addEventListener('click', doExport);
+  form.addEventListener('change', (e) => {
+    if (e.target.name === 'scope') updateImageCount();
+    exportError('');
   });
-  // CSV 預設不內嵌圖片（試算表單格有字數上限）；JSON 預設內嵌
-  el.dialog.querySelectorAll('input[name="format"]').forEach((r) =>
-    r.addEventListener('change', () => {
-      el.dialog.querySelector('input[name="embedImages"]').checked = r.value === 'json';
-    })
-  );
   window.addEventListener('beforeunload', flushSaves);
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') flushSaves();
   });
+  // 拖曳圖片到圖片區以外的地方時，不要讓瀏覽器直接開啟該圖片
+  window.addEventListener('dragover', (e) => e.preventDefault());
+  window.addEventListener('drop', (e) => e.preventDefault());
 
   // ---------- 啟動 ----------
   (async function init() {
     try {
-      state.characters = await CharDB.getAll();
-      for (const c of state.characters) {
-        c.dialogues = c.dialogues || [];
-        TEXT_FIELDS.forEach((f) => (c[f] = c[f] || ''));
-      }
+      state.characters = (await CharDB.getAll()).map(normalize);
     } catch (err) {
       console.error(err);
       toast('無法讀取資料：' + err.message, true);
